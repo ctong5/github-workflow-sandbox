@@ -1,0 +1,35 @@
+name: Automatically sync main to develop
+on:
+  push:
+    branches: [ main ]
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Ensure gh is authenticated
+        run: gh auth status || gh auth login --with-token <<< "$GH_TOKEN"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create PR main -> develop if none exists
+        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
+        run: |
+          set -e
+          if gh pr list --base develop --head main --state open --json number --jq 'length==0'; then
+            gh pr create --base develop --head main \
+              --title "Sync main -> develop" \
+              --body "Automated PR to sync main into develop."
+          fi
+
+      - name: Enable auto-merge (merge commit)
+        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
+        run: |
+          NUMBER=$(gh pr list --base develop --head main --state open --json number --jq '.[0].number')
+          gh pr merge --auto --merge "$NUMBER"
