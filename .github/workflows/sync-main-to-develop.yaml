@@ -8,6 +8,13 @@ permissions:
   actions: read
 jobs:
   sync:
+    # Run for: (a) push to main OR (b) a merged PR into main OR (c) manual dispatch
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.merged == true &&
+       github.event.pull_request.base.ref == 'main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
