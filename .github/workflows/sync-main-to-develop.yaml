@@ -42,8 +42,35 @@ jobs:
           fi
           echo "PR_NUMBER=$(gh pr list --base develop --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number')" >> $GITHUB_ENV
 
-      - name: Enable auto-merge (merge commit)
+      - name: Wait for mergeability to be computed
         if: env.PR_NUMBER != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh pr merge --auto --merge "$PR_NUMBER"
+        run: |
+          set -euo pipefail
+          for i in {1..24}; do
+            state=$(gh pr view "$PR_NUMBER" --json mergeStateStatus --jq .mergeStateStatus)
+            echo "mergeStateStatus=$state"
+            # UNKNOWN/UNSTABLE => GitHub still calculating; keep waiting
+            if [[ "$state" != "UNKNOWN" && "$state" != "UNSTABLE" ]]; then
+              break
+            fi
+            sleep 5
+          done
+
+      - name: Enable auto-merge (merge commit) with retry
+        if: env.PR_NUMBER != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          for i in {1..6}; do
+            if gh pr merge --auto --merge "$PR_NUMBER"; then
+              exit 0
+            fi
+            echo "Auto-merge not enableable yet (attempt $i); retrying..."
+            sleep 10
+          done
+          echo "::error::Failed to enable auto-merge after retries."
+          exit 1
+
