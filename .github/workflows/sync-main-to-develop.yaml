@@ -1,4 +1,4 @@
-name: Sync main to develop
+name: Automatically sync main to develop
 on:
   push:
     branches: [ main ]
