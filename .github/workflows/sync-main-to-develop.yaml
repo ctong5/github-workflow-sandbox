@@ -1,4 +1,4 @@
-name: Automatically sync main to develop
+name: Sync main to develop
 on:
   push:
     branches: [ main ]
@@ -18,7 +18,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create PR main -> develop if none exists
+      - name: Create PR main to develop if none exists
         env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
         run: |
           set -e
