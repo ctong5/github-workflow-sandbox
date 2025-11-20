@@ -22,16 +22,28 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Create or reuse PR main -> develop
+      - name: Create sync branch from main
+        run: |
+          set -euo pipefail
+          SYNC_BRANCH="sync/main-to-develop-${GITHUB_RUN_ID}"
+          git switch -c "$SYNC_BRANCH"
+          git push -u origin "$SYNC_BRANCH"
+          echo "SYNC_BRANCH=$SYNC_BRANCH" >> $GITHUB_ENV
+
+      - name: Open/reuse PR to develop
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if gh pr list --base develop --head main --state open --json number --jq 'length==0'; then
-            gh pr create --base develop --head main \
+          if gh pr list --base develop --head "$SYNC_BRANCH" --state open --json number --jq 'length==0'; then
+            gh pr create --base develop --head "$SYNC_BRANCH" \
               --title "Sync main -> develop" \
               --body "Automated PR to sync main into develop."
           fi
-          NUMBER=$(gh pr list --base develop --head main --state open --json number --jq '.[0].number')
-          echo "PR #$NUMBER"
-          gh pr merge --auto --merge "$NUMBER"
+          echo "PR_NUMBER=$(gh pr list --base develop --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number')" >> $GITHUB_ENV
+
+      - name: Enable auto-merge (merge commit)
+        if: env.PR_NUMBER != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr merge --auto --merge "$PR_NUMBER"
