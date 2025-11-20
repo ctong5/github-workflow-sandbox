@@ -1,42 +1,55 @@
-name: Automatically sync main to develop #test
+# .github/workflows/sync-main-to-develop.yml
+name: Sync main -> develop
 on:
   push:
     branches: [ main ]
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+
 permissions:
   contents: write
   pull-requests: write
   actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   sync:
-    # Run for: (a) push to main OR (b) a merged PR into main OR (c) manual dispatch
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.merged == true &&
-       github.event.pull_request.base.ref == 'main')
+    # run for: push to main, merged PR into main, or manual dispatch
+    if: ${{ github.event_name == 'workflow_dispatch' ||
+            github.event_name == 'push' ||
+            (github.event_name == 'pull_request' &&
+             github.event.pull_request.merged == true &&
+             github.event.pull_request.base.ref == 'main') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Ensure gh is authenticated
-        run: gh auth status || gh auth login --with-token <<< "$GH_TOKEN"
+      - name: Create or reuse PR main -> develop
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create PR main -> develop if none exists
-        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
         run: |
-          set -e
-          if gh pr list --base develop --head main --state open --json number --jq 'length==0'; then
+          set -euo pipefail
+          open_count=$(gh pr list --base develop --head main --state open --json number --jq 'length')
+          if [ "$open_count" -eq 0 ]; then
             gh pr create --base develop --head main \
               --title "Sync main -> develop" \
               --body "Automated PR to sync main into develop."
           fi
 
       - name: Enable auto-merge (merge commit)
-        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          NUMBER=$(gh pr list --base develop --head main --state open --json number --jq '.[0].number')
-          gh pr merge --auto --merge "$NUMBER"
+          pr_number=$(gh pr list --base develop --head main --state open --json number --jq '.[0].number')
+          if [ -n "$pr_number" ]; then
+            gh pr merge --auto --merge "$pr_number"
+          else
+            echo "No open sync PR to auto-merge."
+          fi
