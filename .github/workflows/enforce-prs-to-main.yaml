@@ -1,4 +1,4 @@
-name: Enforce PRs to main - allow only release/* or hotfix/*
+name: Enforce PRs to main (from release/* or hotfix/*)
 on:
   pull_request:
     types: [opened, reopened, synchronize, edited, ready_for_review]
@@ -12,10 +12,10 @@ concurrency:
 
 jobs:
   enforce:
-    if: ${{ github.event.pull_request.base.ref == 'main' }}   # only gate when base is main
+    if: ${{ github.event.pull_request.base.ref == 'main' }} # only gate when base is main
     runs-on: ubuntu-latest
     steps:
-      - name: Allow only release/* or hotfix/* sources
+      - name: Allow only release/* or hotfix/* PRs into main
         run: |
           echo "Base: ${{ github.event.pull_request.base.ref }}"
           echo "Head: ${{ github.head_ref }}"
