@@ -1,35 +1,49 @@
-name: Automatically sync main to develop
+name: Sync main -> develop
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:
+
 permissions:
   contents: write
   pull-requests: write
   actions: read
+
+# single lane for this workflow; cancels older runs if you push in quick succession
+concurrency:
+  group: sync-main-develop
+  cancel-in-progress: true
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
 
-      - name: Ensure gh is authenticated
-        run: gh auth status || gh auth login --with-token <<< "$GH_TOKEN"
+      - name: Create sync branch from main
+        run: |
+          set -euo pipefail
+          SYNC_BRANCH="sync/main-to-develop-${GITHUB_RUN_ID}"
+          git switch -c "$SYNC_BRANCH"
+          git push -u origin "$SYNC_BRANCH"
+          echo "SYNC_BRANCH=$SYNC_BRANCH" >> $GITHUB_ENV
+
+      - name: Open/reuse PR to develop
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create PR main -> develop if none exists
-        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
         run: |
-          set -e
-          if gh pr list --base develop --head main --state open --json number --jq 'length==0'; then
-            gh pr create --base develop --head main \
+          set -euo pipefail
+          if gh pr list --base develop --head "$SYNC_BRANCH" --state open --json number --jq 'length==0'; then
+            gh pr create --base develop --head "$SYNC_BRANCH" \
               --title "Sync main -> develop" \
               --body "Automated PR to sync main into develop."
           fi
+          echo "PR_NUMBER=$(gh pr list --base develop --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number')" >> $GITHUB_ENV
 
       - name: Enable auto-merge (merge commit)
-        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
-        run: |
-          NUMBER=$(gh pr list --base develop --head main --state open --json number --jq '.[0].number')
-          gh pr merge --auto --merge "$NUMBER"
+        if: env.PR_NUMBER != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr merge --auto --merge "$PR_NUMBER"
