@@ -9,7 +9,7 @@ permissions:
   pull-requests: write
   actions: read
 
-# single lane for this workflow; cancels older runs if you push in quick succession
+# single lane for this workflow; cancel older runs if devs push in quick succession
 concurrency:
   group: sync-main-develop
   cancel-in-progress: true
@@ -73,4 +73,3 @@ jobs:
           done
           echo "::error::Failed to enable auto-merge after retries."
           exit 1
-
