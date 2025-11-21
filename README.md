@@ -26,3 +26,5 @@ To set up all branches, run:
 ```
 
 Or refer to [BRANCH_SETUP.md](BRANCH_SETUP.md) for manual setup instructions.
+
+Commit #2 to get squashed
