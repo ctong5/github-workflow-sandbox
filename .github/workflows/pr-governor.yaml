@@ -46,6 +46,17 @@ jobs:
           fi
           echo "OK: $HEAD -> main allowed"
 
+      - name: Gate PRs into develop; block release/hotfix into develop (use main instead)
+        if: ${{ github.event.pull_request.base.ref == 'develop' }}
+        run: |
+          HEAD='${{ github.event.pull_request.head.ref }}'
+          BASE='${{ github.event.pull_request.base.ref }}'
+          if [[ "$HEAD" =~ ^(release\/|hotfix\/) ]]; then
+            echo "::error::Release/Hotfix branches must target 'main' (got: '$HEAD' -> '$BASE'). Merge to main; the sync workflow will propagate to develop."
+            exit 1
+          fi
+          echo "OK: $HEAD -> $BASE (not a release/hotfix source)"
+
       - name: Auto-squash for develop PRs; skip drafts and exempt heads (main, sync/*)
         if: >-
           ${{ github.event.pull_request.base.ref == 'develop' &&
