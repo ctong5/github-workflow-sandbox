@@ -109,8 +109,8 @@ jobs:
                   [ -n "${SUBJ}" ] && echo "* ${SHORT_SHA7}: ${SUBJ}" >> "${BODY_FILE}" && PRINTED_ANY="true"
                 fi
               done <<EOF
-              ${SHAS}
-              EOF
+          ${SHAS}
+          EOF
               if [ "${PRINTED_ANY}" != "true" ]; then
                 if [ -n "${PR_NUM:-}" ]; then
                   echo "* ${PR_TITLE} ([#${PR_NUM}](${REPO_URL}/pull/${PR_NUM}))" >> "${BODY_FILE}"
