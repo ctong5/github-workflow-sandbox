@@ -60,7 +60,7 @@ jobs:
           git push -u --force-with-lease origin "${SYNC_BRANCH}"
 
       # NEW: wait until head is visible; verify base; compute diff
-      - name: Preflight: ensure head exists & compute diff
+      - name: (Preflight) ensure head exists & compute diff
         env:
           SYNC_BRANCH: ${{ steps.syncmeta.outputs.SYNC_BRANCH }}
           GH_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
