@@ -1,0 +1,79 @@
+# ===============================================
+# PR Governor Workflow:
+# - gate PRs into main by source branch
+# - auto-squash PRs into develop (except drafts and exempt heads)
+# 
+# Repository settings must:
+# - allow both squash merges (for ticket PRs) and merge commits (for main → develop)
+# - enable auto-merge
+#  ===============================================
+
+name: PR Governor
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, ready_for_review, labeled, unlabeled]
+    branches: [ main, develop ]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  actions: read
+
+# Only one run per PR; cancel in-progress runs on new events
+concurrency:
+  group: pr-governor-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  governor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo context
+        run: |
+          echo "base=${{ github.event.pull_request.base.ref }}"
+          echo "head=${{ github.event.pull_request.head.ref }}"
+          echo "draft=${{ github.event.pull_request.draft }}"
+
+      - name: Gate PRs into main; only allow release/* or hotfix/*
+        if: ${{ github.event.pull_request.base.ref == 'main' }}
+        run: |
+          HEAD='${{ github.event.pull_request.head.ref }}'
+          if [[ ! "$HEAD" =~ ^(release\/|hotfix\/) ]]; then
+            echo "::error::PRs into main must come from release/* or hotfix/* (got '$HEAD')."
+            exit 1
+          fi
+          echo "OK: $HEAD -> main allowed"
+
+      - name: Auto-squash for develop PRs; skip drafts and exempt heads (main, sync/*)
+        if: >-
+          ${{ github.event.pull_request.base.ref == 'develop' &&
+              github.event.pull_request.draft == false &&
+              github.event.pull_request.head.ref != 'main' &&
+              !startsWith(github.event.pull_request.head.ref, 'sync/') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # wait for GitHub to compute mergeability to avoid UNSTABLE/UNKNOWN
+          for i in {1..24}; do
+            state=$(gh pr view "$PR" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus)
+            echo "mergeStateStatus=$state"
+            [[ "$state" =~ ^(UNKNOWN|UNSTABLE)$ ]] && sleep 5 || break
+          done
+          # arm squash auto-merge; GitHub merges once checks/approvals pass
+          gh pr merge "$PR" --repo "$REPO" --squash --auto || {
+            echo "Retrying arm after short wait..."; sleep 10;
+            gh pr merge "$PR" --repo "$REPO" --squash --auto;
+          }
+
+      - name: Note skips for drafts and exempt heads
+        if: >-
+          ${{ github.event.pull_request.base.ref == 'develop' &&
+              (github.event.pull_request.draft == true ||
+               github.event.pull_request.head.ref == 'main' ||
+               startsWith(github.event.pull_request.head.ref, 'sync/')) }}
+        run: echo "Skipping auto-squash for draft or exempt head."
