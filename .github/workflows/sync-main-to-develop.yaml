@@ -48,23 +48,14 @@ jobs:
           echo "SYNC_BRANCH=${SYNC_BRANCH}" >> "${GITHUB_OUTPUT}"
           echo "SHORT_SHA=${SHORT_SHA}"     >> "${GITHUB_OUTPUT}"
 
-      - name: Create or refresh sync branch from main (force-update)
-        env:
-          SYNC_BRANCH: ${{ steps.syncmeta.outputs.SYNC_BRANCH }}
-        run: |
-          set -euo pipefail
-          git fetch --quiet origin main
-          git checkout -B "${SYNC_BRANCH}" origin/main
-          git push -u -f origin "${SYNC_BRANCH}"
-
-      - name: Open (or reuse) PR to sync main to develop with commit description
+      - name: Open (or reuse) sync/main-to-develop PR with description
         env:
           SYNC_BRANCH: ${{ steps.syncmeta.outputs.SYNC_BRANCH }}
           SHORT_SHA:   ${{ steps.syncmeta.outputs.SHORT_SHA }}
           GH_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
           REPO:        ${{ github.repository }}
           BEFORE:      ${{ github.event.before }}   # empty for workflow_dispatch
-          AFTER:       ${{ github.sha }}            # the pushed SHA
+          AFTER:       ${{ github.sha }}            # the pushed SHA on main
         run: |
           set -euo pipefail
 
@@ -75,50 +66,94 @@ jobs:
           echo "Automated PR to sync **main** into **develop**." >> "${BODY_FILE}"
           echo "" >> "${BODY_FILE}"
 
+          # Latest on main: prefer PR title + link; else commit subject + link
+          LATEST_LINE=""
           if [ -n "${AFTER:-}" ]; then
-            SHORT_AFTER="${AFTER:0:12}"
-            echo "Latest on \`main\`:" >> "${BODY_FILE}"
-            echo "- Commit: ${REPO_URL}/commit/${AFTER}" >> "${BODY_FILE}"
-            title="$(gh api "repos/${REPO}/commits/${AFTER}" --jq '.commit.message | split("\n")[0]' || true)"
-            if [ -n "${title}" ]; then
-              echo "- Title: ${title}" >> "${BODY_FILE}"
+            PR_JSON="$(gh api "repos/${REPO}/commits/${AFTER}/pulls" \
+                        -H "Accept: application/vnd.github.groot-preview+json" || true)"
+            PR_NUM="$(echo "${PR_JSON}" | jq -r '.[0].number // empty')"
+            if [ -n "${PR_NUM}" ]; then
+              PR_TITLE="$(echo "${PR_JSON}" | jq -r '.[0].title')"
+              LATEST_LINE="Latest on main: ${PR_TITLE} ([#${PR_NUM}](${REPO_URL}/pull/${PR_NUM}))"
+            else
+              SUBJECT="$(gh api "repos/${REPO}/commits/${AFTER}" --jq '.commit.message | split("\n")[0]' || true)"
+              SHORT_AFTER="${AFTER:0:7}"
+              LATEST_LINE="Latest on main: ${SUBJECT} ([${SHORT_AFTER}](${REPO_URL}/commit/${AFTER}))"
             fi
           fi
+          [ -n "${LATEST_LINE}" ] && echo "${LATEST_LINE}" >> "${BODY_FILE}"
 
+          # Commits in this sync (PR titles when possible; fallback to commit subjects)
           if [ -n "${BEFORE:-}" ] && [ -n "${AFTER:-}" ]; then
-            echo "- Compare: ${REPO_URL}/compare/${BEFORE}...${AFTER}" >> "${BODY_FILE}"
             echo "" >> "${BODY_FILE}"
+            echo "Commits in this sync:" >> "${BODY_FILE}"
 
-            # Try Compare API first (often excludes the merge commit itself)
-            COUNT="$(gh api "repos/${REPO}/compare/${BEFORE}...${AFTER}" --jq '.commits | length' || echo 0)"
+            # Try Compare API first
+            COUNT="$(gh api "repos/${REPO}/compare/${BEFORE}...${AFTER}" --jq '.commits | length' 2>/dev/null || echo 0)"
 
             if [ "${COUNT}" -gt 0 ]; then
-              echo "Commits in this sync:" >> "${BODY_FILE}"
-              gh api "repos/${REPO}/compare/${BEFORE}...${AFTER}" \
-                --jq '.commits[0:50][] | "- \(.sha[0:7]): \(.commit.message | split("\n")[0])"' \
-                -r >> "${BODY_FILE}" || true
+              SHAS="$(gh api "repos/${REPO}/compare/${BEFORE}...${AFTER}" --jq '.commits[].sha' 2>/dev/null || true)"
+              PRINTED_ANY="false"
+              while IFS= read -r SHA; do
+                [ -z "${SHA}" ] && continue
+                PRS="$(gh api "repos/${REPO}/commits/${SHA}/pulls" \
+                        -H "Accept: application/vnd.github.groot-preview+json" 2>/dev/null || true)"
+                PRN="$(echo "${PRS}" | jq -r '.[0].number // empty')"
+                if [ -n "${PRN}" ]; then
+                  PRT="$(echo "${PRS}" | jq -r '.[0].title')"
+                  echo "* ${PRT} ([#${PRN}](${REPO_URL}/pull/${PRN}))" >> "${BODY_FILE}"
+                  PRINTED_ANY="true"
+                else
+                  SUBJ="$(gh api "repos/${REPO}/commits/${SHA}" --jq '.commit.message | split("\n")[0]' 2>/dev/null || true)"
+                  SHORT_SHA7="${SHA:0:7}"
+                  [ -n "${SUBJ}" ] && echo "* ${SHORT_SHA7}: ${SUBJ}" >> "${BODY_FILE}" && PRINTED_ANY="true"
+                fi
+              done <<EOF
+              ${SHAS}
+              EOF
+              if [ "${PRINTED_ANY}" != "true" ]; then
+                if [ -n "${PR_NUM:-}" ]; then
+                  echo "* ${PR_TITLE} ([#${PR_NUM}](${REPO_URL}/pull/${PR_NUM}))" >> "${BODY_FILE}"
+                elif [ -n "${SUBJECT:-}" ]; then
+                  SHORT_AFTER="${AFTER:0:7}"
+                  echo "* ${SHORT_AFTER}: ${SUBJECT}" >> "${BODY_FILE}"
+                fi
+              fi
             else
-              # Fallback: find the PR associated with the merge commit and list its commits
+              # Fallback: associate the AFTER merge commit with its PR and list those commits
               PR_INFO="$(gh api "repos/${REPO}/commits/${AFTER}/pulls" \
                           -H "Accept: application/vnd.github.groot-preview+json" \
-                          --jq '.[0] | "\(.number)|\(.title)|\(.head.ref)"' || true)"
-
+                          --jq '.[0] | "\(.number)|\(.title)"' 2>/dev/null || true)"
               if [ -n "${PR_INFO}" ]; then
-                IFS='|' read -r pr_num pr_title pr_head <<< "${PR_INFO}"
-                echo "Commits in this sync (from PR #${pr_num}: ${pr_title}):" >> "${BODY_FILE}"
-                gh api "repos/${REPO}/pulls/${pr_num}/commits" --paginate \
-                  --jq '.[] | "- \(.sha[0:7]): \(.commit.message | split("\n")[0])"' \
-                  -r >> "${BODY_FILE}" || true
+                IFS='|' read -r PRNUM_FALLBACK PRTITLE_FALLBACK <<< "${PR_INFO}"
+                echo "* ${PRTITLE_FALLBACK} ([#${PRNUM_FALLBACK}](${REPO_URL}/pull/${PRNUM_FALLBACK}))" >> "${BODY_FILE}"
+                # (Optional) enumerate commits in the PR if you want a full list:
+                # gh api "repos/${REPO}/pulls/${PRNUM_FALLBACK}/commits" --paginate \
+                #   --jq '.[] | "* \(.sha[0:7]): \(.commit.message | split("\n")[0])"' >> "${BODY_FILE}" || true
               else
-                echo "Commits in this sync: (merge commit only — no additional commits listed by Compare API)" >> "${BODY_FILE}"
+                SHORT_AFTER="${AFTER:0:7}"
+                [ -n "${SUBJECT:-}" ] && echo "* ${SHORT_AFTER}: ${SUBJECT}" >> "${BODY_FILE}"
               fi
             fi
           fi
 
-          # Open or reuse the PR as before
+          # Full changelog link
+          if [ -n "${BEFORE:-}" ] && [ -n "${AFTER:-}" ]; then
+            echo "" >> "${BODY_FILE}"
+            SHORT_BEFORE="${BEFORE:0:7}"
+            SHORT_AFTER="${AFTER:0:7}"
+            echo "Full Changelog: [${SHORT_BEFORE}...${SHORT_AFTER}](${REPO_URL}/compare/${BEFORE}...${AFTER})" >> "${BODY_FILE}"
+          fi
+
+          # Open or reuse the PR
           EXISTING="$(gh pr list --repo "${REPO}" --base develop --head "${SYNC_BRANCH}" --state open --json number --jq '.[0].number // empty')"
 
-          if [ -z "${EXISTING}" ]; then
+          if [ -n "${EXISTING}" ]; then
+            PR_NUMBER="${EXISTING}"
+            gh pr edit "${PR_NUMBER}" --repo "${REPO}" \
+              --title "Sync main to develop (${SHORT_SHA})" \
+              --body-file "${BODY_FILE}"
+          else
             gh pr create \
               --repo  "${REPO}" \
               --base  develop \
@@ -126,15 +161,10 @@ jobs:
               --title "Sync main -> develop (${SHORT_SHA})" \
               --body-file "${BODY_FILE}"
             PR_NUMBER="$(gh pr list --repo "${REPO}" --base develop --head "${SYNC_BRANCH}" --state open --json number --jq '.[0].number')"
-          else
-            PR_NUMBER="${EXISTING}"
-            gh pr edit "${PR_NUMBER}" --repo "${REPO}" \
-              --title "Sync main -> develop (${SHORT_SHA})" \
-              --body-file "${BODY_FILE}"
           fi
 
           echo "PR_NUMBER=${PR_NUMBER}" >> "${GITHUB_ENV}"
-
+   
       - name: Wait for mergeability to be confirmed (avoid UNSTABLE/UNKNOWN flakey states)
         if: env.PR_NUMBER != ''
         env:
