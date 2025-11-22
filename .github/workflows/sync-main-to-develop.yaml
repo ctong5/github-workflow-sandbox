@@ -1,4 +1,11 @@
-name: Sync main -> develop
+# ==============================
+# Sync main branch to develop branch
+# On push to main, create/update PR to develop
+# Auto-merge PR with merge commit
+# ==============================
+
+name: Sync main to develop
+
 on:
   push:
     branches: [ main ]
@@ -9,9 +16,9 @@ permissions:
   pull-requests: write
   actions: read
 
-# single lane for this workflow; cancel older runs if devs push in quick succession
+# Only one sync job at a time; cancel in-progress on new pushes
 concurrency:
-  group: sync-main-develop
+  group: sync-main-to-develop
   cancel-in-progress: true
 
 jobs:
@@ -22,53 +29,85 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Create sync branch from main
-        run: |
-          set -euo pipefail
-          SYNC_BRANCH="sync/main-to-develop-${GITHUB_RUN_ID}"
-          git switch -c "$SYNC_BRANCH"
-          git push -u origin "$SYNC_BRANCH"
-          echo "SYNC_BRANCH=$SYNC_BRANCH" >> $GITHUB_ENV
-
-      - name: Open/reuse PR to develop
+      - name: Compute sync metadata
+        id: syncmeta
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          if gh pr list --base develop --head "$SYNC_BRANCH" --state open --json number --jq 'length==0'; then
-            gh pr create --base develop --head "$SYNC_BRANCH" \
-              --title "Sync main -> develop" \
-              --body "Automated PR to sync main into develop."
-          fi
-          echo "PR_NUMBER=$(gh pr list --base develop --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number')" >> $GITHUB_ENV
+          SYNC_BRANCH='sync/main-to-develop'
 
-      - name: Wait for mergeability to be computed
+          # Short SHA (12 chars) for traceability
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            git fetch --quiet origin main
+            SHORT_SHA="$(git rev-parse --short=12 origin/main)"
+          else
+            SHORT_SHA="${GITHUB_SHA:0:12}"
+          fi
+
+          echo "SYNC_BRANCH=${SYNC_BRANCH}" >> "${GITHUB_OUTPUT}"
+          echo "SHORT_SHA=${SHORT_SHA}"     >> "${GITHUB_OUTPUT}"
+
+      - name: Create or refresh sync branch from main (force-update)
+        env:
+          SYNC_BRANCH: ${{ steps.syncmeta.outputs.SYNC_BRANCH }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          git checkout -B "${SYNC_BRANCH}" origin/main
+          git push -u -f origin "${SYNC_BRANCH}"
+
+      - name: Open or reuse PR main to develop
+        env:
+          SYNC_BRANCH: ${{ steps.syncmeta.outputs.SYNC_BRANCH }}
+          SHORT_SHA:   ${{ steps.syncmeta.outputs.SHORT_SHA }}
+          GH_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
+          REPO:        ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          existing="$(gh pr list --repo "${REPO}" --base develop --head "${SYNC_BRANCH}" --state open --json number --jq '.[0].number // empty')"
+
+          if [ -z "${existing}" ]; then
+            gh pr create \
+              --repo  "${REPO}" \
+              --base  develop \
+              --head  "${SYNC_BRANCH}" \
+              --title "Sync main -> develop (${SHORT_SHA})" \
+              --body  "Automated PR to sync main into develop."
+            PR_NUMBER="$(gh pr list --repo "${REPO}" --base develop --head "${SYNC_BRANCH}" --state open --json number --jq '.[0].number')"
+          else
+            PR_NUMBER="${existing}"
+            gh pr edit "${PR_NUMBER}" --repo "${REPO}" --title "Sync main -> develop (${SHORT_SHA})"
+          fi
+
+          echo "PR_NUMBER=${PR_NUMBER}" >> "${GITHUB_ENV}"
+
+      - name: Wait for mergeability to be confirmed (avoid UNSTABLE/UNKNOWN flakey states)
         if: env.PR_NUMBER != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           for i in {1..24}; do
-            state=$(gh pr view "$PR_NUMBER" --json mergeStateStatus --jq .mergeStateStatus)
+            state=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus)
             echo "mergeStateStatus=$state"
-            # UNKNOWN/UNSTABLE => GitHub still calculating; keep waiting
-            if [[ "$state" != "UNKNOWN" && "$state" != "UNSTABLE" ]]; then
-              break
-            fi
-            sleep 5
+            [[ "$state" =~ ^(UNKNOWN|UNSTABLE)$ ]] && sleep 5 || break
           done
 
       - name: Enable auto-merge (merge commit) with retry
         if: env.PR_NUMBER != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           for i in {1..6}; do
-            if gh pr merge --auto --merge "$PR_NUMBER"; then
+            if gh pr merge "$PR_NUMBER" --repo "$REPO" --merge --auto; then
+              echo "Auto-merge enabled (merge commit)."
               exit 0
             fi
-            echo "Auto-merge not enableable yet (attempt $i); retrying..."
+            echo "Auto-merge not enableable yet (attempt $i); retrying in 10s..."
             sleep 10
           done
           echo "::error::Failed to enable auto-merge after retries."
