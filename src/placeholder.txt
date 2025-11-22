@@ -9,3 +9,5 @@ another comment
 are we synced yet?
 new comment
 new comment after push
+smoketest
+restart actions

@@ -37,18 +37,60 @@ jobs:
           set -euo pipefail
           SYNC_BRANCH='sync/main-to-develop'
 
-          # Short SHA (12 chars) for traceability
+          # Short SHA 7 chars) for traceability
           if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
             git fetch --quiet origin main
-            SHORT_SHA="$(git rev-parse --short=12 origin/main)"
+            SHORT_SHA="$(git rev-parse --short=7 origin/main)"
           else
-            SHORT_SHA="${GITHUB_SHA:0:12}"
+            SHORT_SHA="${GITHUB_SHA:0:7}"
           fi
 
           echo "SYNC_BRANCH=${SYNC_BRANCH}" >> "${GITHUB_OUTPUT}"
           echo "SHORT_SHA=${SHORT_SHA}"     >> "${GITHUB_OUTPUT}"
 
+      # NEW: rolling branch force-update (critical)
+      - name: Create or refresh sync branch from main (force-update)
+        env:
+          SYNC_BRANCH: ${{ steps.syncmeta.outputs.SYNC_BRANCH }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          echo "Force-updating remote ${SYNC_BRANCH} to match origin/main"
+          git checkout -B "${SYNC_BRANCH}" origin/main
+          git push -u --force-with-lease origin "${SYNC_BRANCH}"
+
+      # NEW: wait until head is visible; verify base; compute diff
+      - name: (Preflight) ensure head exists & compute diff
+        env:
+          SYNC_BRANCH: ${{ steps.syncmeta.outputs.SYNC_BRANCH }}
+          GH_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
+          REPO:        ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # 1) Wait for head ref to be visible via API (avoids "Head sha can't be blank")
+          for i in {1..20}; do
+            if gh api "repos/${REPO}/git/ref/heads/${SYNC_BRANCH}" >/dev/null 2>&1; then
+              break
+            fi
+            echo "Head ref not visible yet; retrying (${i}/20)…"
+            sleep 2
+          done
+
+          # 2) Verify base branch exists (avoids "Base sha can't be blank")
+          gh api "repos/${REPO}/branches/develop" >/dev/null
+
+          # 3) Compute ahead_by; skip PR when no diff (avoids "No commits between …")
+          AHEAD="$(gh api "repos/${REPO}/compare/develop...${SYNC_BRANCH}" --jq '.ahead_by' 2>/dev/null || echo 0)"
+          echo "AHEAD=${AHEAD}"
+          if [ "${AHEAD}" -gt 0 ]; then
+            echo "HAS_DIFF=true"  >> "${GITHUB_ENV}"
+          else
+            echo "HAS_DIFF=false" >> "${GITHUB_ENV}"
+          fi
+
       - name: Open (or reuse) PR to sync main to develop
+        if: env.HAS_DIFF == 'true'
         env:
           SYNC_BRANCH: ${{ steps.syncmeta.outputs.SYNC_BRANCH }}
           SHORT_SHA:   ${{ steps.syncmeta.outputs.SHORT_SHA }}
@@ -117,7 +159,7 @@ jobs:
           echo "PR_NUMBER=${PR_NUMBER}" >> "${GITHUB_ENV}"
 
       - name: Wait for mergeability to be confirmed (avoid UNSTABLE/UNKNOWN flakey states)
-        if: env.PR_NUMBER != ''
+        if: env.HAS_DIFF == 'true' && env.PR_NUMBER != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -130,7 +172,7 @@ jobs:
           done
 
       - name: Enable auto-merge (merge commit) with retry
-        if: env.PR_NUMBER != ''
+        if: env.HAS_DIFF == 'true' && env.PR_NUMBER != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
